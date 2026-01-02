@@ -1,215 +1,370 @@
+#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Setup script for Windows 11 Pro development workstation.
-    
+    Comprehensive PowerShell script to set up a Windows 11 Pro development workstation with WSL2 and Ubuntu
 .DESCRIPTION
-    This script automates the setup of a Windows 11 Pro development workstation.
-    It installs essential development tools, configures WSL 2 with Ubuntu, and sets up the development environment.
-    
+    This script automates the installation and configuration of essential development tools,
+    WSL 2 (Windows Subsystem for Linux), and Ubuntu on Windows 11 Pro.
 .EXAMPLE
     .\Setup-DevWorkstation.ps1 -Verbose
-    
-.NOTES
-    Requires Administrator privileges.
-    Run from an elevated PowerShell prompt.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [string]$UbuntuVersion = "22.04",
+    [switch]$SkipWSL,
     
     [Parameter(Mandatory = $false)]
-    [ValidateSet("LTS", "Latest")]
-    [string]$DistroType = "LTS"
+    [switch]$SkipChocolatey,
+    
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipNodeJS,
+    
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipDocker,
+    
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipGit,
+    
+    [Parameter(Mandatory = $false)]
+    [switch]$SkipVSCode,
+    
+    [Parameter(Mandatory = $false)]
+    [switch]$AllowPrerelease
 )
 
-# Set error action preference
+# ==================== Constants ====================
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 
-# Helper functions
-function Write-Log {
-    param(
-        [string]$Message,
-        [ValidateSet("Info", "Warning", "Error")]
-        [string]$Level = "Info"
-    )
-    
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $output = "[$timestamp] [$Level] $Message"
-    
-    switch ($Level) {
-        "Info" { Write-Host $output -ForegroundColor Green }
-        "Warning" { Write-Host $output -ForegroundColor Yellow }
-        "Error" { Write-Host $output -ForegroundColor Red }
-    }
+# Colors for output
+$Colors = @{
+    Success = "Green"
+    Error   = "Red"
+    Warning = "Yellow"
+    Info    = "Cyan"
 }
 
-function Test-AdminPrivileges {
-    $principal = New-Object System.Security.Principal.WindowsPrincipal([System.Security.Principal.WindowsIdentity]::GetCurrent())
-    return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
-}
+# ==================== Helper Functions ====================
 
-function Enable-WindowsFeature {
+function Write-ColorOutput {
+    <#
+    .SYNOPSIS
+        Write colored output to console
+    #>
     param(
         [Parameter(Mandatory = $true)]
-        [string]$FeatureName
+        [string]$Message,
+        
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Success', 'Error', 'Warning', 'Info')]
+        [string]$Color = 'Info'
     )
     
-    Write-Log "Enabling Windows feature: $FeatureName"
+    $ForegroundColor = $Colors[$Color]
+    Write-Host $Message -ForegroundColor $ForegroundColor
+}
+
+function Test-CommandExists {
+    <#
+    .SYNOPSIS
+        Test if a command exists in the current session
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Command
+    )
+    
+    $null = Get-Command $Command -ErrorAction SilentlyContinue
+    return $?
+}
+
+function Invoke-CommandWithLogging {
+    <#
+    .SYNOPSIS
+        Execute a command and log the results
+    #>
+    param(
+        [Parameter(Mandatory = $true)]
+        [scriptblock]$ScriptBlock,
+        
+        [Parameter(Mandatory = $true)]
+        [string]$Description
+    )
+    
+    Write-ColorOutput "Executing: $Description" -Color Info
     
     try {
-        Enable-WindowsOptionalFeature -Online -FeatureName $FeatureName -NoRestart -ErrorAction Stop | Out-Null
-        Write-Log "Successfully enabled: $FeatureName"
+        & $ScriptBlock
+        Write-ColorOutput "✓ Success: $Description" -Color Success
+        return $true
     }
     catch {
-        Write-Log "Failed to enable $FeatureName : $_" -Level "Error"
-        throw
+        Write-ColorOutput "✗ Failed: $Description - $($_.Exception.Message)" -Color Error
+        return $false
     }
 }
+
+# ==================== WSL2 and Ubuntu Setup ====================
 
 function Install-WSL2 {
-    Write-Log "Installing WSL 2..."
+    <#
+    .SYNOPSIS
+        Install WSL 2 and Ubuntu on Windows 11 Pro
+    .DESCRIPTION
+        This function enables WSL2, installs the WSL kernel update, and sets up Ubuntu
+    #>
     
-    try {
-        # Enable required Windows features
-        Enable-WindowsFeature "Microsoft-Windows-Subsystem-Linux"
-        Enable-WindowsFeature "VirtualMachinePlatform"
-        
-        # Set WSL 2 as default
-        Write-Log "Setting WSL 2 as default version"
-        wsl --set-default-version 2 | Out-Null
-        
-        Write-Log "WSL 2 installation completed"
+    Write-ColorOutput "Starting WSL 2 and Ubuntu Setup..." -Color Info
+    
+    # Check if WSL is already installed
+    $wslStatus = wsl --status 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        Write-ColorOutput "WSL 2 is already installed" -Color Success
+        return
     }
-    catch {
-        Write-Log "Failed to install WSL 2: $_" -Level "Error"
-        throw
-    }
+    
+    # Enable WSL feature
+    Write-ColorOutput "Enabling Windows Subsystem for Linux feature..." -Color Info
+    Invoke-CommandWithLogging {
+        Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart -WarningAction SilentlyContinue | Out-Null
+    } "Enable WSL feature"
+    
+    # Enable Virtual Machine Platform feature
+    Write-ColorOutput "Enabling Virtual Machine Platform feature..." -Color Info
+    Invoke-CommandWithLogging {
+        Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart -WarningAction SilentlyContinue | Out-Null
+    } "Enable Virtual Machine Platform"
+    
+    # Set WSL 2 as default
+    Write-ColorOutput "Setting WSL 2 as default version..." -Color Info
+    Invoke-CommandWithLogging {
+        wsl --set-default-version 2
+    } "Set WSL 2 as default"
+    
+    # Download and install WSL Kernel update
+    Write-ColorOutput "Downloading WSL 2 Kernel update..." -Color Info
+    $kernelUri = "https://wslstorestorage.blob.core.windows.net/wslblob/wsl_update_x64.msi"
+    $kernelPath = "$env:TEMP\wsl_update_x64.msi"
+    
+    Invoke-CommandWithLogging {
+        Invoke-WebRequest -Uri $kernelUri -OutFile $kernelPath -UseBasicParsing
+    } "Download WSL Kernel MSI"
+    
+    # Install the kernel update
+    Write-ColorOutput "Installing WSL 2 Kernel update..." -Color Info
+    Invoke-CommandWithLogging {
+        msiexec.exe /i $kernelPath /quiet /norestart
+        Start-Sleep -Seconds 5
+    } "Install WSL Kernel"
+    
+    # Clean up
+    Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
+    
+    # Install Ubuntu from Microsoft Store
+    Write-ColorOutput "Installing Ubuntu from Microsoft Store..." -Color Info
+    Invoke-CommandWithLogging {
+        winget install Canonical.Ubuntu --exact --source winget --accept-source-agreements --accept-package-agreements
+    } "Install Ubuntu via winget"
+    
+    Write-ColorOutput "✓ WSL 2 and Ubuntu setup completed. Please restart your computer and run Ubuntu to complete the installation." -Color Success
 }
 
-function Install-Ubuntu {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Version,
-        
-        [Parameter(Mandatory = $true)]
-        [ValidateSet("LTS", "Latest")]
-        [string]$Type
-    )
+# ==================== Package Manager Setup ====================
+
+function Install-Chocolatey {
+    <#
+    .SYNOPSIS
+        Install Chocolatey package manager if not already installed
+    #>
     
-    Write-Log "Installing Ubuntu $Version ($Type)..."
+    if (Test-CommandExists "choco") {
+        Write-ColorOutput "Chocolatey is already installed" -Color Success
+        return
+    }
     
-    try {
-        # Use winget to install Ubuntu
-        $ubuntuPackage = if ($Type -eq "LTS") {
-            "Canonical.Ubuntu"
-        }
-        else {
-            "Canonical.Ubuntu"
-        }
-        
-        Write-Log "Installing Ubuntu distribution via winget"
-        winget install --exact --quiet $ubuntuPackage
-        
-        Write-Log "Ubuntu installation completed"
-    }
-    catch {
-        Write-Log "Failed to install Ubuntu: $_" -Level "Error"
-        throw
-    }
+    Write-ColorOutput "Installing Chocolatey..." -Color Info
+    Invoke-CommandWithLogging {
+        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
+        [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
+    } "Install Chocolatey"
 }
 
-function Install-DeveloperTools {
-    Write-Log "Installing developer tools..."
+# ==================== Development Tools Setup ====================
+
+function Install-Git {
+    <#
+    .SYNOPSIS
+        Install Git version control system
+    #>
     
-    try {
-        $tools = @(
-            "Git.Git",
-            "Microsoft.PowerShell",
-            "Microsoft.VisualStudioCode",
-            "JetBrains.IntelliJIDEA.Community",
-            "OpenJS.NodeJS",
-            "Python.Python.3"
-        )
-        
-        foreach ($tool in $tools) {
-            Write-Log "Installing $tool"
-            winget install --exact --quiet $tool
-        }
-        
-        Write-Log "Developer tools installation completed"
+    if (Test-CommandExists "git") {
+        Write-ColorOutput "Git is already installed" -Color Success
+        return
     }
-    catch {
-        Write-Log "Failed to install developer tools: $_" -Level "Error"
-        throw
-    }
+    
+    Write-ColorOutput "Installing Git..." -Color Info
+    Invoke-CommandWithLogging {
+        choco install git -y --params="/GitOnlyOnPath /WindowsTerminal /NoShellIntegrationFallback"
+    } "Install Git via Chocolatey"
 }
 
-function Configure-Environment {
-    Write-Log "Configuring development environment..."
+function Install-NodeJS {
+    <#
+    .SYNOPSIS
+        Install Node.js and npm
+    #>
     
-    try {
-        # Configure Git
-        Write-Log "Configuring Git"
-        git config --global core.autocrlf true
-        
-        # Create development directories
-        Write-Log "Creating development directories"
-        $devPaths = @(
-            "$env:USERPROFILE\Development",
-            "$env:USERPROFILE\Development\Projects",
-            "$env:USERPROFILE\Development\Tools"
-        )
-        
-        foreach ($path in $devPaths) {
-            if (-not (Test-Path $path)) {
-                New-Item -ItemType Directory -Path $path -Force | Out-Null
-                Write-Log "Created directory: $path"
-            }
-        }
-        
-        Write-Log "Environment configuration completed"
+    if (Test-CommandExists "node") {
+        Write-ColorOutput "Node.js is already installed" -Color Success
+        return
     }
-    catch {
-        Write-Log "Failed to configure environment: $_" -Level "Error"
-        throw
-    }
+    
+    Write-ColorOutput "Installing Node.js..." -Color Info
+    Invoke-CommandWithLogging {
+        choco install nodejs -y
+    } "Install Node.js via Chocolatey"
 }
 
-# Main execution
+function Install-Docker {
+    <#
+    .SYNOPSIS
+        Install Docker Desktop
+    #>
+    
+    if (Test-CommandExists "docker") {
+        Write-ColorOutput "Docker is already installed" -Color Success
+        return
+    }
+    
+    Write-ColorOutput "Installing Docker Desktop..." -Color Info
+    Invoke-CommandWithLogging {
+        choco install docker-desktop -y
+    } "Install Docker Desktop via Chocolatey"
+}
+
+function Install-VSCode {
+    <#
+    .SYNOPSIS
+        Install Visual Studio Code
+    #>
+    
+    if (Test-CommandExists "code") {
+        Write-ColorOutput "Visual Studio Code is already installed" -Color Success
+        return
+    }
+    
+    Write-ColorOutput "Installing Visual Studio Code..." -Color Info
+    Invoke-CommandWithLogging {
+        choco install vscode -y
+    } "Install VS Code via Chocolatey"
+}
+
+# ==================== System Configuration ====================
+
+function Update-EnvironmentVariables {
+    <#
+    .SYNOPSIS
+        Refresh environment variables in the current session
+    #>
+    
+    Write-ColorOutput "Updating environment variables..." -Color Info
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+}
+
+function Configure-ExecutionPolicy {
+    <#
+    .SYNOPSIS
+        Configure PowerShell execution policy for current user
+    #>
+    
+    Write-ColorOutput "Configuring PowerShell execution policy..." -Color Info
+    Invoke-CommandWithLogging {
+        Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
+    } "Set execution policy to RemoteSigned"
+}
+
+# ==================== Main Script Execution ====================
+
 function Main {
-    Write-Log "Starting Windows 11 Pro Development Workstation Setup"
+    Write-ColorOutput "================================================" -Color Info
+    Write-ColorOutput "Windows 11 Pro Development Workstation Setup" -Color Info
+    Write-ColorOutput "================================================" -Color Info
+    Write-ColorOutput "Start Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Color Info
+    Write-ColorOutput ""
     
-    # Check for admin privileges
-    if (-not (Test-AdminPrivileges)) {
-        Write-Log "This script requires Administrator privileges" -Level "Error"
-        exit 1
-    }
+    # Display configuration
+    Write-ColorOutput "Setup Configuration:" -Color Info
+    Write-ColorOutput "  Skip WSL:        $SkipWSL" -Color Info
+    Write-ColorOutput "  Skip Chocolatey: $SkipChocolatey" -Color Info
+    Write-ColorOutput "  Skip Node.js:    $SkipNodeJS" -Color Info
+    Write-ColorOutput "  Skip Docker:     $SkipDocker" -Color Info
+    Write-ColorOutput "  Skip Git:        $SkipGit" -Color Info
+    Write-ColorOutput "  Skip VS Code:    $SkipVSCode" -Color Info
+    Write-ColorOutput "  Allow Prerelease: $AllowPrerelease" -Color Info
+    Write-ColorOutput ""
     
-    Write-Log "Administrator privileges confirmed"
-    
-    try {
-        # Install WSL 2
+    # WSL 2 and Ubuntu setup
+    if (-not $SkipWSL) {
         Install-WSL2
-        
-        # Install Ubuntu
-        Install-Ubuntu -Version $UbuntuVersion -Type $DistroType
-        
-        # Install developer tools
-        Install-DeveloperTools
-        
-        # Configure environment
-        Configure-Environment
-        
-        Write-Log "Setup completed successfully"
-        Write-Log "Please restart your computer to complete the installation"
+        Write-ColorOutput ""
     }
-    catch {
-        Write-Log "Setup failed: $_" -Level "Error"
-        exit 1
+    else {
+        Write-ColorOutput "Skipping WSL 2 installation (as requested)" -Color Warning
+        Write-ColorOutput ""
     }
+    
+    # Chocolatey setup
+    if (-not $SkipChocolatey) {
+        Install-Chocolatey
+        Write-ColorOutput ""
+    }
+    else {
+        Write-ColorOutput "Skipping Chocolatey installation (as requested)" -Color Warning
+        Write-ColorOutput ""
+    }
+    
+    # Git setup
+    if (-not $SkipGit -and -not $SkipChocolatey) {
+        Install-Git
+        Write-ColorOutput ""
+    }
+    
+    # Node.js setup
+    if (-not $SkipNodeJS -and -not $SkipChocolatey) {
+        Install-NodeJS
+        Write-ColorOutput ""
+    }
+    
+    # Docker setup
+    if (-not $SkipDocker -and -not $SkipChocolatey) {
+        Install-Docker
+        Write-ColorOutput ""
+    }
+    
+    # VS Code setup
+    if (-not $SkipVSCode -and -not $SkipChocolatey) {
+        Install-VSCode
+        Write-ColorOutput ""
+    }
+    
+    # Configure system
+    Update-EnvironmentVariables
+    Configure-ExecutionPolicy
+    
+    Write-ColorOutput ""
+    Write-ColorOutput "================================================" -Color Info
+    Write-ColorOutput "Setup completed successfully!" -Color Success
+    Write-ColorOutput "End Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Color Info
+    Write-ColorOutput "================================================" -Color Info
+    Write-ColorOutput ""
+    Write-ColorOutput "Recommended next steps:" -Color Info
+    Write-ColorOutput "1. Restart your computer to complete WSL 2 and Windows feature installations" -Color Info
+    Write-ColorOutput "2. Run Ubuntu from Start Menu and complete the initial setup" -Color Info
+    Write-ColorOutput "3. Configure Git globally (git config --global user.name 'Your Name')" -Color Info
+    Write-ColorOutput "4. Check installation versions: git --version, node --version, docker --version" -Color Info
 }
 
-# Run main function
+# Execute main function
 Main
