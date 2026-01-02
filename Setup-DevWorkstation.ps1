@@ -1,370 +1,624 @@
-#Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    Comprehensive PowerShell script to set up a Windows 11 Pro development workstation with WSL2 and Ubuntu
+    Developer Workstation Setup Automation Script for Windows 11 Pro
+    
 .DESCRIPTION
-    This script automates the installation and configuration of essential development tools,
-    WSL 2 (Windows Subsystem for Linux), and Ubuntu on Windows 11 Pro.
+    This script automates the setup of a complete developer workstation on Windows 11 Pro.
+    It installs essential development tools, sets up the environment, and configures system settings.
+    
+.PARAMETER SkipAdmin
+    If set to $true, skips the administrator check (not recommended)
+    
+.PARAMETER LogPath
+    Path where setup logs will be stored. Defaults to $env:TEMP\DevSetup_$(Get-Date -Format 'yyyyMMdd_HHmmss').log
+    
 .EXAMPLE
-    .\Setup-DevWorkstation.ps1 -Verbose
+    .\Setup-DevWorkstation.ps1
+    
+.EXAMPLE
+    .\Setup-DevWorkstation.ps1 -LogPath "C:\Logs\setup.log"
+    
+.NOTES
+    Author: DevOps Team
+    Version: 1.0.0
+    Created: 2026-01-02
+    PowerShell Version: 5.1 or higher required
+    Administrator privileges required
 #>
 
-[CmdletBinding()]
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
     [Parameter(Mandatory = $false)]
-    [switch]$SkipWSL,
+    [bool]$SkipAdmin = $false,
     
     [Parameter(Mandatory = $false)]
-    [switch]$SkipChocolatey,
-    
-    [Parameter(Mandatory = $false)]
-    [switch]$SkipNodeJS,
-    
-    [Parameter(Mandatory = $false)]
-    [switch]$SkipDocker,
-    
-    [Parameter(Mandatory = $false)]
-    [switch]$SkipGit,
-    
-    [Parameter(Mandatory = $false)]
-    [switch]$SkipVSCode,
-    
-    [Parameter(Mandatory = $false)]
-    [switch]$AllowPrerelease
+    [string]$LogPath = "$env:TEMP\DevSetup_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 )
 
-# ==================== Constants ====================
-$ErrorActionPreference = "Stop"
-$ProgressPreference = "SilentlyContinue"
+# ============================================================================
+# Global Configuration
+# ============================================================================
 
-# Colors for output
-$Colors = @{
-    Success = "Green"
-    Error   = "Red"
-    Warning = "Yellow"
-    Info    = "Cyan"
-}
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$VerbosePreference = 'Continue'
 
-# ==================== Helper Functions ====================
+$ScriptVersion = "1.0.0"
+$ScriptStartTime = Get-Date
+$Global:SetupLog = @()
 
-function Write-ColorOutput {
+# ============================================================================
+# Logging Functions
+# ============================================================================
+
+function Write-Log {
     <#
     .SYNOPSIS
-        Write colored output to console
+    Writes log messages to both console and log file
     #>
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory = $true)]
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
         [string]$Message,
         
         [Parameter(Mandatory = $false)]
-        [ValidateSet('Success', 'Error', 'Warning', 'Info')]
-        [string]$Color = 'Info'
+        [ValidateSet('Info', 'Warning', 'Error', 'Success')]
+        [string]$Level = 'Info'
     )
     
-    $ForegroundColor = $Colors[$Color]
-    Write-Host $Message -ForegroundColor $ForegroundColor
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $logMessage = "[$timestamp] [$Level] $Message"
+    
+    $Global:SetupLog += $logMessage
+    
+    switch ($Level) {
+        'Info' { Write-Host $logMessage -ForegroundColor Cyan }
+        'Warning' { Write-Host $logMessage -ForegroundColor Yellow }
+        'Error' { Write-Host $logMessage -ForegroundColor Red }
+        'Success' { Write-Host $logMessage -ForegroundColor Green }
+    }
+    
+    Add-Content -Path $LogPath -Value $logMessage -ErrorAction SilentlyContinue
 }
 
-function Test-CommandExists {
+function Write-Header {
     <#
     .SYNOPSIS
-        Test if a command exists in the current session
+    Writes a formatted header to the log
     #>
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Command
-    )
+    param([string]$Text)
     
-    $null = Get-Command $Command -ErrorAction SilentlyContinue
-    return $?
+    $separator = "=" * 70
+    Write-Log $separator
+    Write-Log $Text
+    Write-Log $separator
 }
 
-function Invoke-CommandWithLogging {
+# ============================================================================
+# Validation Functions
+# ============================================================================
+
+function Test-AdminPrivileges {
     <#
     .SYNOPSIS
-        Execute a command and log the results
+    Verifies that the script is running with administrator privileges
     #>
-    param(
-        [Parameter(Mandatory = $true)]
-        [scriptblock]$ScriptBlock,
-        
-        [Parameter(Mandatory = $true)]
-        [string]$Description
-    )
+    $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     
-    Write-ColorOutput "Executing: $Description" -Color Info
+    if (-not $isAdmin) {
+        Write-Log "This script requires administrator privileges to run." -Level Error
+        if (-not $SkipAdmin) {
+            Write-Log "Exiting setup due to insufficient privileges." -Level Error
+            exit 1
+        }
+        Write-Log "Admin check bypassed due to -SkipAdmin flag." -Level Warning
+    }
+    else {
+        Write-Log "Administrator privileges verified." -Level Success
+    }
+}
+
+function Test-WindowsVersion {
+    <#
+    .SYNOPSIS
+    Validates that the system is running Windows 11
+    #>
+    $osInfo = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
+    $osVersion = [version]$osInfo.CurrentVersion
+    $buildNumber = [int]$osInfo.CurrentBuildNumber
+    
+    Write-Log "Operating System: $($osInfo.ProductName) (Build: $buildNumber)"
+    
+    if ($osVersion.Major -lt 10 -or $buildNumber -lt 22000) {
+        Write-Log "Windows 11 or higher is required for optimal compatibility." -Level Warning
+    }
+    else {
+        Write-Log "Windows version check passed." -Level Success
+    }
+}
+
+# ============================================================================
+# Package Management Functions
+# ============================================================================
+
+function Install-Winget {
+    <#
+    .SYNOPSIS
+    Ensures Windows Package Manager (winget) is installed and up to date
+    #>
+    Write-Header "Installing/Updating Windows Package Manager (winget)"
     
     try {
-        & $ScriptBlock
-        Write-ColorOutput "✓ Success: $Description" -Color Success
-        return $true
+        $wingetPath = Get-Command winget -ErrorAction SilentlyContinue
+        if ($wingetPath) {
+            Write-Log "winget is already installed." -Level Success
+            return $true
+        }
+        
+        Write-Log "Installing Windows Package Manager from Microsoft Store..."
+        
+        # Attempt to install via Store
+        $appPackage = 'Microsoft.DesktopAppInstaller'
+        
+        Write-Log "Note: winget may need to be installed from Microsoft Store manually."
+        Write-Log "Opening Microsoft Store to install App Installer..."
+        
+        Start-Process -FilePath "ms-windows-store://pdp/?productid=9NBLGGH4NNS1"
+        Start-Sleep -Seconds 3
+        
+        Write-Log "Please complete the installation in Microsoft Store and run this script again if needed." -Level Warning
+        return $false
     }
     catch {
-        Write-ColorOutput "✗ Failed: $Description - $($_.Exception.Message)" -Color Error
+        Write-Log "Error installing winget: $_" -Level Error
         return $false
     }
 }
 
-# ==================== WSL2 and Ubuntu Setup ====================
-
-function Install-WSL2 {
-    <#
-    .SYNOPSIS
-        Install WSL 2 and Ubuntu on Windows 11 Pro
-    .DESCRIPTION
-        This function enables WSL2, installs the WSL kernel update, and sets up Ubuntu
-    #>
-    
-    Write-ColorOutput "Starting WSL 2 and Ubuntu Setup..." -Color Info
-    
-    # Check if WSL is already installed
-    $wslStatus = wsl --status 2>$null
-    if ($LASTEXITCODE -eq 0) {
-        Write-ColorOutput "WSL 2 is already installed" -Color Success
-        return
-    }
-    
-    # Enable WSL feature
-    Write-ColorOutput "Enabling Windows Subsystem for Linux feature..." -Color Info
-    Invoke-CommandWithLogging {
-        Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -NoRestart -WarningAction SilentlyContinue | Out-Null
-    } "Enable WSL feature"
-    
-    # Enable Virtual Machine Platform feature
-    Write-ColorOutput "Enabling Virtual Machine Platform feature..." -Color Info
-    Invoke-CommandWithLogging {
-        Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -NoRestart -WarningAction SilentlyContinue | Out-Null
-    } "Enable Virtual Machine Platform"
-    
-    # Set WSL 2 as default
-    Write-ColorOutput "Setting WSL 2 as default version..." -Color Info
-    Invoke-CommandWithLogging {
-        wsl --set-default-version 2
-    } "Set WSL 2 as default"
-    
-    # Download and install WSL Kernel update
-    Write-ColorOutput "Downloading WSL 2 Kernel update..." -Color Info
-    $kernelUri = "https://wslstorestorage.blob.core.windows.net/wslblob/wsl_update_x64.msi"
-    $kernelPath = "$env:TEMP\wsl_update_x64.msi"
-    
-    Invoke-CommandWithLogging {
-        Invoke-WebRequest -Uri $kernelUri -OutFile $kernelPath -UseBasicParsing
-    } "Download WSL Kernel MSI"
-    
-    # Install the kernel update
-    Write-ColorOutput "Installing WSL 2 Kernel update..." -Color Info
-    Invoke-CommandWithLogging {
-        msiexec.exe /i $kernelPath /quiet /norestart
-        Start-Sleep -Seconds 5
-    } "Install WSL Kernel"
-    
-    # Clean up
-    Remove-Item $kernelPath -Force -ErrorAction SilentlyContinue
-    
-    # Install Ubuntu from Microsoft Store
-    Write-ColorOutput "Installing Ubuntu from Microsoft Store..." -Color Info
-    Invoke-CommandWithLogging {
-        winget install Canonical.Ubuntu --exact --source winget --accept-source-agreements --accept-package-agreements
-    } "Install Ubuntu via winget"
-    
-    Write-ColorOutput "✓ WSL 2 and Ubuntu setup completed. Please restart your computer and run Ubuntu to complete the installation." -Color Success
-}
-
-# ==================== Package Manager Setup ====================
-
 function Install-Chocolatey {
     <#
     .SYNOPSIS
-        Install Chocolatey package manager if not already installed
+    Installs Chocolatey package manager if not already installed
     #>
+    Write-Header "Installing Chocolatey Package Manager"
     
-    if (Test-CommandExists "choco") {
-        Write-ColorOutput "Chocolatey is already installed" -Color Success
-        return
-    }
-    
-    Write-ColorOutput "Installing Chocolatey..." -Color Info
-    Invoke-CommandWithLogging {
-        Set-ExecutionPolicy -ExecutionPolicy Bypass -Scope Process -Force
+    try {
+        $chocoPath = Get-Command choco -ErrorAction SilentlyContinue
+        
+        if ($chocoPath) {
+            Write-Log "Chocolatey is already installed." -Level Success
+            return $true
+        }
+        
+        Write-Log "Installing Chocolatey..."
+        
+        Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope Process -Force
         [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
-        iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))
-    } "Install Chocolatey"
+        
+        $chocoInstallScript = (New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1')
+        Invoke-Expression $chocoInstallScript
+        
+        Write-Log "Chocolatey installed successfully." -Level Success
+        return $true
+    }
+    catch {
+        Write-Log "Error installing Chocolatey: $_" -Level Error
+        return $false
+    }
 }
 
-# ==================== Development Tools Setup ====================
+# ============================================================================
+# Development Tools Installation
+# ============================================================================
 
-function Install-Git {
+function Install-DevelopmentTools {
     <#
     .SYNOPSIS
-        Install Git version control system
+    Installs essential development tools
     #>
+    Write-Header "Installing Development Tools"
     
-    if (Test-CommandExists "git") {
-        Write-ColorOutput "Git is already installed" -Color Success
-        return
+    $tools = @(
+        @{ Name = "git"; Package = "git"; Type = "Choco" }
+        @{ Name = "Visual Studio Code"; Package = "vscode"; Type = "Choco" }
+        @{ Name = "PowerShell 7"; Package = "powershell-core"; Type = "Choco" }
+        @{ Name = "Node.js"; Package = "nodejs"; Type = "Choco" }
+        @{ Name = "Python"; Package = "python"; Type = "Choco" }
+        @{ Name = "Docker Desktop"; Package = "docker-desktop"; Type = "Choco" }
+        @{ Name = "7-Zip"; Package = "7zip"; Type = "Choco" }
+        @{ Name = "Notepad++"; Package = "notepadplusplus"; Type = "Choco" }
+    )
+    
+    foreach ($tool in $tools) {
+        try {
+            Write-Log "Installing $($tool.Name)..."
+            
+            if ($tool.Type -eq 'Choco') {
+                $installed = choco list --local-only | Select-String -Pattern "^$($tool.Package)\s" -ErrorAction SilentlyContinue
+                
+                if ($installed) {
+                    Write-Log "$($tool.Name) is already installed." -Level Success
+                }
+                else {
+                    choco install $tool.Package -y --no-progress
+                    Write-Log "$($tool.Name) installed successfully." -Level Success
+                }
+            }
+        }
+        catch {
+            Write-Log "Error installing $($tool.Name): $_" -Level Warning
+        }
     }
-    
-    Write-ColorOutput "Installing Git..." -Color Info
-    Invoke-CommandWithLogging {
-        choco install git -y --params="/GitOnlyOnPath /WindowsTerminal /NoShellIntegrationFallback"
-    } "Install Git via Chocolatey"
 }
 
-function Install-NodeJS {
+function Install-DotNetTools {
     <#
     .SYNOPSIS
-        Install Node.js and npm
+    Installs .NET development tools and SDKs
     #>
+    Write-Header "Installing .NET Development Tools"
     
-    if (Test-CommandExists "node") {
-        Write-ColorOutput "Node.js is already installed" -Color Success
-        return
+    try {
+        Write-Log "Checking for .NET SDKs..."
+        
+        $dotnetInstalled = Get-Command dotnet -ErrorAction SilentlyContinue
+        
+        if ($dotnetInstalled) {
+            Write-Log ".NET is already installed." -Level Success
+            & dotnet --version
+        }
+        else {
+            Write-Log "Installing .NET SDK..."
+            choco install dotnet-sdk -y --no-progress
+            Write-Log ".NET SDK installed successfully." -Level Success
+        }
     }
-    
-    Write-ColorOutput "Installing Node.js..." -Color Info
-    Invoke-CommandWithLogging {
-        choco install nodejs -y
-    } "Install Node.js via Chocolatey"
+    catch {
+        Write-Log "Error with .NET installation: $_" -Level Warning
+    }
 }
 
-function Install-Docker {
+function Install-DatabaseTools {
     <#
     .SYNOPSIS
-        Install Docker Desktop
+    Installs database tools and clients
     #>
+    Write-Header "Installing Database Tools"
     
-    if (Test-CommandExists "docker") {
-        Write-ColorOutput "Docker is already installed" -Color Success
-        return
+    $dbTools = @(
+        @{ Name = "SQL Server Management Studio"; Package = "sql-server-management-studio"; Type = "Choco" }
+        @{ Name = "MySQL Workbench"; Package = "mysql-workbench"; Type = "Choco" }
+        @{ Name = "DBeaver"; Package = "dbeaver"; Type = "Choco" }
+    )
+    
+    foreach ($tool in $dbTools) {
+        try {
+            Write-Log "Installing $($tool.Name)..."
+            choco install $tool.Package -y --no-progress
+            Write-Log "$($tool.Name) installed successfully." -Level Success
+        }
+        catch {
+            Write-Log "Error installing $($tool.Name): $_" -Level Warning
+        }
     }
-    
-    Write-ColorOutput "Installing Docker Desktop..." -Color Info
-    Invoke-CommandWithLogging {
-        choco install docker-desktop -y
-    } "Install Docker Desktop via Chocolatey"
 }
 
-function Install-VSCode {
+# ============================================================================
+# Environment Configuration Functions
+# ============================================================================
+
+function Configure-GitEnvironment {
     <#
     .SYNOPSIS
-        Install Visual Studio Code
+    Configures Git with default settings
     #>
+    Write-Header "Configuring Git Environment"
     
-    if (Test-CommandExists "code") {
-        Write-ColorOutput "Visual Studio Code is already installed" -Color Success
-        return
+    try {
+        $gitInstalled = Get-Command git -ErrorAction SilentlyContinue
+        
+        if (-not $gitInstalled) {
+            Write-Log "Git is not installed. Skipping Git configuration." -Level Warning
+            return
+        }
+        
+        Write-Log "Configuring Git with default settings..."
+        
+        # Configure Git line endings for Windows
+        git config --global core.autocrlf true
+        git config --global core.safecrlf warn
+        
+        # Configure editor
+        git config --global core.editor "code --wait"
+        
+        # Enable colored output
+        git config --global color.ui true
+        
+        Write-Log "Git environment configured successfully." -Level Success
     }
-    
-    Write-ColorOutput "Installing Visual Studio Code..." -Color Info
-    Invoke-CommandWithLogging {
-        choco install vscode -y
-    } "Install VS Code via Chocolatey"
+    catch {
+        Write-Log "Error configuring Git: $_" -Level Warning
+    }
 }
 
-# ==================== System Configuration ====================
-
-function Update-EnvironmentVariables {
+function Configure-PowerShellProfile {
     <#
     .SYNOPSIS
-        Refresh environment variables in the current session
+    Creates and configures PowerShell profile for development
     #>
+    Write-Header "Configuring PowerShell Profile"
     
-    Write-ColorOutput "Updating environment variables..." -Color Info
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    try {
+        $psProfilePath = $PROFILE
+        $profileDir = Split-Path -Path $psProfilePath -Parent
+        
+        if (-not (Test-Path -Path $profileDir)) {
+            New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+            Write-Log "Created PowerShell profile directory."
+        }
+        
+        if (-not (Test-Path -Path $psProfilePath)) {
+            $profileContent = @"
+# PowerShell Development Profile
+# Generated: $(Get-Date)
+
+# Set location to home directory
+Set-Location -Path `$HOME
+
+# Create useful aliases
+New-Alias -Name which -Value Get-Command -Force -ErrorAction SilentlyContinue
+
+# Function: Create new directory and enter it
+function New-DirectoryAndEnter {
+    param([string]`$Path)
+    New-Item -ItemType Directory -Path `$Path -Force | Out-Null
+    Set-Location -Path `$Path
+}
+New-Alias -Name mkcd -Value New-DirectoryAndEnter -Force -ErrorAction SilentlyContinue
+
+# Function: Quick git status
+function gs { git status }
+New-Alias -Name gs -Value gs -Force -ErrorAction SilentlyContinue
+
+# Function: Quick git log
+function gl { git log --oneline -10 }
+New-Alias -Name gl -Value gl -Force -ErrorAction SilentlyContinue
+
+# Set PSReadLine options for better experience
+if (Get-Module -Name PSReadLine -ListAvailable) {
+    Set-PSReadLineKeyHandler -Key Tab -Function MenuComplete
+    Set-PSReadLineOption -PredictionSource History
 }
 
-function Configure-ExecutionPolicy {
+Write-Host "PowerShell Development Profile Loaded" -ForegroundColor Green
+"@
+            
+            Set-Content -Path $psProfilePath -Value $profileContent -Force
+            Write-Log "PowerShell profile created and configured." -Level Success
+        }
+        else {
+            Write-Log "PowerShell profile already exists." -Level Success
+        }
+    }
+    catch {
+        Write-Log "Error configuring PowerShell profile: $_" -Level Warning
+    }
+}
+
+function Configure-SystemEnvironment {
     <#
     .SYNOPSIS
-        Configure PowerShell execution policy for current user
+    Configures system environment variables
     #>
+    Write-Header "Configuring System Environment Variables"
     
-    Write-ColorOutput "Configuring PowerShell execution policy..." -Color Info
-    Invoke-CommandWithLogging {
-        Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser -Force
-    } "Set execution policy to RemoteSigned"
+    try {
+        Write-Log "Configuring environment variables for development..."
+        
+        # Create dev workspace directory
+        $devPath = "$env:USERPROFILE\Development"
+        if (-not (Test-Path -Path $devPath)) {
+            New-Item -ItemType Directory -Path $devPath -Force | Out-Null
+            Write-Log "Created Development workspace directory: $devPath"
+        }
+        
+        # Set environment variable
+        [Environment]::SetEnvironmentVariable('DEV_WORKSPACE', $devPath, [EnvironmentVariableTarget]::User)
+        Write-Log "Set DEV_WORKSPACE environment variable."
+        
+        Write-Log "System environment configured successfully." -Level Success
+    }
+    catch {
+        Write-Log "Error configuring system environment: $_" -Level Error
+    }
 }
 
-# ==================== Main Script Execution ====================
+# ============================================================================
+# System Configuration Functions
+# ============================================================================
 
-function Main {
-    Write-ColorOutput "================================================" -Color Info
-    Write-ColorOutput "Windows 11 Pro Development Workstation Setup" -Color Info
-    Write-ColorOutput "================================================" -Color Info
-    Write-ColorOutput "Start Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Color Info
-    Write-ColorOutput ""
+function Enable-DeveloperFeatures {
+    <#
+    .SYNOPSIS
+    Enables Windows developer features and optional features
+    #>
+    Write-Header "Enabling Windows Developer Features"
     
-    # Display configuration
-    Write-ColorOutput "Setup Configuration:" -Color Info
-    Write-ColorOutput "  Skip WSL:        $SkipWSL" -Color Info
-    Write-ColorOutput "  Skip Chocolatey: $SkipChocolatey" -Color Info
-    Write-ColorOutput "  Skip Node.js:    $SkipNodeJS" -Color Info
-    Write-ColorOutput "  Skip Docker:     $SkipDocker" -Color Info
-    Write-ColorOutput "  Skip Git:        $SkipGit" -Color Info
-    Write-ColorOutput "  Skip VS Code:    $SkipVSCode" -Color Info
-    Write-ColorOutput "  Allow Prerelease: $AllowPrerelease" -Color Info
-    Write-ColorOutput ""
-    
-    # WSL 2 and Ubuntu setup
-    if (-not $SkipWSL) {
-        Install-WSL2
-        Write-ColorOutput ""
+    try {
+        Write-Log "Enabling Developer Mode..."
+        
+        # Enable Developer Mode
+        New-Item -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\AppModelUnlock" -Force | Out-Null
+        New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\AppModelUnlock" -Name "AllowDevelopmentWithoutDevLicense" -PropertyType DWORD -Value 1 -Force | Out-Null
+        
+        Write-Log "Developer Mode enabled." -Level Success
+        
+        Write-Log "Enabling optional Windows features..."
+        
+        $features = @(
+            'VirtualMachinePlatform'
+            'Hyper-V'
+            'Containers'
+            'HypervisorPlatform'
+        )
+        
+        foreach ($feature in $features) {
+            try {
+                $state = Get-WindowsOptionalFeature -Online -FeatureName $feature -ErrorAction SilentlyContinue
+                
+                if ($state.State -ne 'Enabled') {
+                    Write-Log "Enabling $feature..."
+                    Enable-WindowsOptionalFeature -Online -FeatureName $feature -NoRestart -ErrorAction SilentlyContinue
+                    Write-Log "$feature enabled." -Level Success
+                }
+                else {
+                    Write-Log "$feature is already enabled." -Level Success
+                }
+            }
+            catch {
+                Write-Log "Note: Could not enable $feature - it may require restart or be unavailable." -Level Warning
+            }
+        }
     }
-    else {
-        Write-ColorOutput "Skipping WSL 2 installation (as requested)" -Color Warning
-        Write-ColorOutput ""
+    catch {
+        Write-Log "Error enabling developer features: $_" -Level Warning
     }
+}
+
+function Configure-FileExplorer {
+    <#
+    .SYNOPSIS
+    Configures File Explorer settings for development
+    #>
+    Write-Header "Configuring File Explorer"
     
-    # Chocolatey setup
-    if (-not $SkipChocolatey) {
+    try {
+        Write-Log "Configuring File Explorer settings..."
+        
+        # Show hidden files
+        New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "Hidden" -PropertyType DWORD -Value 1 -Force | Out-Null
+        
+        # Show file extensions
+        New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "HideFileExt" -PropertyType DWORD -Value 0 -Force | Out-Null
+        
+        # Show full path in title bar
+        New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" -Name "FullPath" -PropertyType DWORD -Value 1 -Force | Out-Null
+        
+        Write-Log "File Explorer configured." -Level Success
+    }
+    catch {
+        Write-Log "Error configuring File Explorer: $_" -Level Warning
+    }
+}
+
+function Optimize-SystemPerformance {
+    <#
+    .SYNOPSIS
+    Applies system performance optimizations
+    #>
+    Write-Header "Optimizing System Performance"
+    
+    try {
+        Write-Log "Applying performance optimizations..."
+        
+        # Disable unnecessary animations
+        New-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "MenuShowDelay" -PropertyType String -Value "0" -Force | Out-Null
+        
+        # Disable transparency effects
+        New-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -PropertyType DWORD -Value 0 -Force | Out-Null
+        
+        Write-Log "System performance optimizations applied." -Level Success
+    }
+    catch {
+        Write-Log "Error optimizing system performance: $_" -Level Warning
+    }
+}
+
+# ============================================================================
+# Cleanup and Summary Functions
+# ============================================================================
+
+function Get-SetupSummary {
+    <#
+    .SYNOPSIS
+    Generates and displays setup summary
+    #>
+    Write-Header "Setup Summary"
+    
+    $elapsedTime = (Get-Date) - $ScriptStartTime
+    
+    Write-Log "Setup completed!"
+    Write-Log "Elapsed Time: $($elapsedTime.Hours)h $($elapsedTime.Minutes)m $($elapsedTime.Seconds)s" -Level Success
+    Write-Log "Log file saved to: $LogPath" -Level Success
+    
+    Write-Log ""
+    Write-Log "Next Steps:" -Level Info
+    Write-Log "1. Restart your computer to complete all installations and configurations."
+    Write-Log "2. Configure your Git credentials: git config --global user.name 'Your Name'"
+    Write-Log "3. Configure your Git email: git config --global user.email 'your.email@example.com'"
+    Write-Log "4. Review the log file for any warnings or errors."
+    Write-Log ""
+}
+
+# ============================================================================
+# Main Execution
+# ============================================================================
+
+function Start-Setup {
+    <#
+    .SYNOPSIS
+    Main setup orchestration function
+    #>
+    try {
+        Clear-Host
+        Write-Host "╔════════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
+        Write-Host "║        Developer Workstation Setup - Windows 11 Pro              ║" -ForegroundColor Cyan
+        Write-Host "║                    Version $ScriptVersion                          ║" -ForegroundColor Cyan
+        Write-Host "╚════════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+        Write-Host ""
+        
+        Write-Log "Setup script started at $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        Write-Log "PowerShell Version: $($PSVersionTable.PSVersion)"
+        Write-Log "Script Version: $ScriptVersion"
+        
+        # Pre-flight checks
+        Test-AdminPrivileges
+        Test-WindowsVersion
+        
+        # Package managers
+        Install-Winget
         Install-Chocolatey
-        Write-ColorOutput ""
+        
+        # Installation phases
+        Install-DevelopmentTools
+        Install-DotNetTools
+        Install-DatabaseTools
+        
+        # Configuration phases
+        Configure-GitEnvironment
+        Configure-PowerShellProfile
+        Configure-SystemEnvironment
+        
+        # System optimization
+        Enable-DeveloperFeatures
+        Configure-FileExplorer
+        Optimize-SystemPerformance
+        
+        # Summary
+        Get-SetupSummary
+        
+        Write-Host ""
+        Write-Host "Setup completed successfully!" -ForegroundColor Green
+        Write-Host "Please restart your computer to complete the setup process." -ForegroundColor Yellow
     }
-    else {
-        Write-ColorOutput "Skipping Chocolatey installation (as requested)" -Color Warning
-        Write-ColorOutput ""
+    catch {
+        Write-Log "Fatal error during setup: $_" -Level Error
+        Write-Log "Setup failed. Please review the log file for details." -Level Error
+        exit 1
     }
-    
-    # Git setup
-    if (-not $SkipGit -and -not $SkipChocolatey) {
-        Install-Git
-        Write-ColorOutput ""
-    }
-    
-    # Node.js setup
-    if (-not $SkipNodeJS -and -not $SkipChocolatey) {
-        Install-NodeJS
-        Write-ColorOutput ""
-    }
-    
-    # Docker setup
-    if (-not $SkipDocker -and -not $SkipChocolatey) {
-        Install-Docker
-        Write-ColorOutput ""
-    }
-    
-    # VS Code setup
-    if (-not $SkipVSCode -and -not $SkipChocolatey) {
-        Install-VSCode
-        Write-ColorOutput ""
-    }
-    
-    # Configure system
-    Update-EnvironmentVariables
-    Configure-ExecutionPolicy
-    
-    Write-ColorOutput ""
-    Write-ColorOutput "================================================" -Color Info
-    Write-ColorOutput "Setup completed successfully!" -Color Success
-    Write-ColorOutput "End Time: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -Color Info
-    Write-ColorOutput "================================================" -Color Info
-    Write-ColorOutput ""
-    Write-ColorOutput "Recommended next steps:" -Color Info
-    Write-ColorOutput "1. Restart your computer to complete WSL 2 and Windows feature installations" -Color Info
-    Write-ColorOutput "2. Run Ubuntu from Start Menu and complete the initial setup" -Color Info
-    Write-ColorOutput "3. Configure Git globally (git config --global user.name 'Your Name')" -Color Info
-    Write-ColorOutput "4. Check installation versions: git --version, node --version, docker --version" -Color Info
 }
 
-# Execute main function
-Main
+# Execute main setup if script is run directly
+if ($MyInvocation.InvocationName -ne '.') {
+    Start-Setup
+}
